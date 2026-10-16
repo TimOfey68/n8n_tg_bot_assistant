@@ -67,7 +67,7 @@
 <h2> Артефакты проекта</h2>
 
 <ul>
-  <li><strong>Техническое задание:</strong> <a href="[docs/TZ_Stroymaterialy.docx](https://github.com/TimOfey68/n8n_tg_bot_assistant/blob/main/%D0%A2%D0%95%D0%A5%D0%9D%D0%98%D0%A7%D0%95%D0%A1%D0%9A%D0%9E%D0%95%20%D0%97%D0%90%D0%94%D0%90%D0%9D%D0%98%D0%95.pdf)">Техзадание</a> — полное ТЗ с KPI, сценариями использования и требованиями безопасности</li>
+  <li><strong>Техническое задание:</strong> <a href="https://github.com/TimOfey68/n8n_tg_bot_assistant/blob/main/%D0%A2%D0%95%D0%A5%D0%9D%D0%98%D0%A7%D0%95%D0%A1%D0%9A%D0%9E%D0%95%20%D0%97%D0%90%D0%94%D0%90%D0%9D%D0%98%D0%95.pdf)">Техзадание</a> — полное ТЗ с KPI, сценариями использования и требованиями безопасности</li>
   <li><strong>Воркфлоу n8n:</strong> <a href="n8n/workflow_Tg_GigaChat_Bot.json">workflow_Tg_GigaChat_Bot.json</a> — экспорт пайплайна для импорта в ваш n8n</li>
   <li><strong>Схема воркфлоу:</strong> <a href="screenshots/workflow_schema.png">workflow_schema.png</a> — визуальное представление всех нод и связей</li>
   <li><strong>Демо работы бота:</strong> <a href="screenshots/telegram_demo.jpg">telegram_demo.jpg</a> — скриншот переписки с StroyBot</li>
