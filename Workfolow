@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Воркфлоу ИИ-ассистента отдела продаж — реализация</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 1100px; margin: 0 auto; padding: 20px; background: #f5f5f5; color: #222; }
+  h1 { color: #1a3a6e; border-bottom: 3px solid #1a3a6e; padding-bottom: 10px; }
+  h2 { color: #2c5282; margin-top: 35px; border-left: 5px solid #2c5282; padding-left: 12px; }
+  h3 { color: #3d6098; margin-top: 25px; }
+  .node { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 18px 22px; margin: 15px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+  .node-title { font-weight: bold; color: #1a3a6e; font-size: 17px; margin-bottom: 8px; }
+  .node-num { display: inline-block; background: #1a3a6e; color: #fff; width: 28px; height: 28px; border-radius: 50%; text-align: center; line-height: 28px; margin-right: 8px; font-size: 14px; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+  .comment { color: #6a9955; }
+  .keyword { color: #569cd6; }
+  .string { color: #ce9178; }
+  .sql { background: #f0f4f8; color: #1a3a6e; border-left: 4px solid #2c5282; }
+  .warn { background: #fff4e5; border-left: 4px solid #e67e22; padding: 10px 15px; margin: 12px 0; border-radius: 4px; }
+  .note { background: #e8f0fe; border-left: 4px solid #2c5282; padding: 10px 15px; margin: 12px 0; border-radius: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; background: #fff; }
+  th, td { border: 1px solid #d0d7de; padding: 10px; text-align: left; }
+  th { background: #1a3a6e; color: #fff; }
+  tr:nth-child(even) { background: #f8f9fa; }
+  .arrow { text-align: center; font-size: 24px; color: #2c5282; margin: 5px 0; }
+</style>
+</head>
+<body>
+
+<h1>Воркфлоу ИИ-ассистента отдела продаж стройматериалов</h1>
+<p><strong>Стек:</strong> n8n (self-hosted) + PostgreSQL + pgvector + GigaChat + VPS Timeweb<br>
+<strong>Каналы:</strong> Telegram Bot API + Email (IMAP/SMTP)<br>
+<strong>Цель:</strong> обработка заявок, расчёт стоимости, формирование КП, эскалация менеджеру</p>
+
+<h2>Схема воркфлоу (общий вид)</h2>
+<div class="node">
+<b>Webhook (Telegram/Email)</b> → <b>Извлечение идентификатора</b> → <b>SQL: проверка клиента</b> →
+<b>Ветвление (авторизован / не авторизован)</b> → <b>LLM: извлечение сущностей</b> →
+<b>RAG: поиск регламентов в pgvector</b> → <b>SQL/Code: расчёт стоимости</b> →
+<b>LLM: формирование ответа/КП</b> → <b>Отправка клиенту</b> → <b>Логирование в БД</b>
+</div>
+
+<h2>Детальное описание узлов с примерами</h2>
+
+<!-- NODE 1 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">1</span>Входящий триггер (Webhook / Telegram Trigger / Email Trigger)</div>
+  <p>Принимает сообщение из Telegram (через <code>setWebhook</code>) или Email (IMAP-нода n8n).</p>
+<pre><span class="comment">// n8n: Telegram Trigger node</span>
+{
+  <span class="string">"updates"</span>: [<span class="string">"message"</span>],
+  <span class="string">"additionalFields"</span>: {}
+}
+
+<span class="comment">// На выходе: $json.message.text, $json.message.chat.id, $json.message.from.id</span></pre>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 2 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">2</span>Извлечение идентификатора клиента</div>
+  <p>Code-нода: определяет канал и формирует единый ключ для поиска в БД.</p>
+<pre><span class="comment">// n8n Code node (JavaScript)</span>
+<span class="keyword">const</span> channel = $input.first().json.channel; <span class="comment">// 'telegram' | 'email'</span>
+<span class="keyword">let</span> identifier = <span class="keyword">null</span>;
+<span class="keyword">let</span> chatId = <span class="keyword">null</span>;
+
+<span class="keyword">if</span> (channel === <span class="string">'telegram'</span>) {
+  identifier = $input.first().json.message.from.id; <span class="comment">// telegram_user_id</span>
+  chatId = $input.first().json.message.chat.id;
+} <span class="keyword">else if</span> (channel === <span class="string">'email'</span>) {
+  identifier = $input.first().json.from; <span class="comment">// email отправителя</span>
+}
+
+<span class="keyword">return</span> [{ json: { identifier, chatId, channel,
+                  text: $input.first().json.text ||
+                        $input.first().json.body } }];</pre>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 3 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">3</span>SQL: проверка клиента в БД</div>
+  <p>PostgreSQL-нода: ищет клиента по идентификатору в таблице <code>wholesale_customers</code>.</p>
+<pre class="sql">-- Поиск клиента по telegram_user_id или email
+SELECT
+  customer_id,
+  company_name,
+  inn,
+  customer_type,     -- 'wholesale' | 'retail'
+  is_verified
+FROM wholesale_customers
+WHERE telegram_user_id = $1
+   OR email = $1
+LIMIT 1;</pre>
+  <div class="note"><b>Параметр $1</b> — это <code>identifier</code> из предыдущей ноды.</div>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 4 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">4</span>IF: клиент авторизован?</div>
+  <p>Ветвление по результату SQL-запроса.</p>
+<pre><span class="comment">// Условие IF в n8n</span>
+{{ $json.customer_id !== undefined && $json.is_verified === true }}
+
+<span class="comment">// TRUE  → идём на ноду 5 (извлечение сущностей)</span>
+<span class="comment">// FALSE → идём на ноду 4a (запрос авторизации)</span></pre>
+
+  <h3>4a. Запрос авторизации (если клиент не найден)</h3>
+<pre><span class="comment">// Ответ клиенту</span>
+<span class="keyword">if</span> (channel === <span class="string">'telegram'</span>) {
+  <span class="keyword">return</span> <span class="string">"Здравствуйте! Для работы с оптовыми ценами, пожалуйста, укажите ваш email или ИНН."</span>;
+} <span class="keyword">else</span> {
+  <span class="keyword">return</span> <span class="string">"Ваш email не найден в базе оптовых клиентов. Для регистрации обратитесь к менеджеру."</span>;
+}</pre>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 5 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">5</span>LLM (GigaChat): извлечение сущностей</div>
+  <p>Из текста клиента извлекаем: товар, количество, город доставки. <b>ПДн в LLM не передаём.</b></p>
+<pre><span class="comment">// Системный промпт для GigaChat</span>
+<span class="string">"Ты — извлекатель сущностей. Из текста запроса клиента извлеки:
+- product (название или артикул товара)
+- quantity (количество, число)
+- city (город доставки)
+Верни JSON: {\"product\": \"...\", \"quantity\": ..., \"city\": \"...\"}
+Если поле не найдено — поставь null. Не выдумывай."</span>
+
+<span class="comment">// User-промпт (только текст запроса, без ПДн)</span>
+<span class="string">"Нужно 500 листов ЦСП 8мм в Москву"</span>
+
+<span class="comment">// Ожидаемый ответ LLM:</span>
+{ <span class="string">"product"</span>: <span class="string">"ЦСП 8мм"</span>, <span class="string">"quantity"</span>: 500, <span class="string">"city"</span>: <span class="string">"Москва"</span> }</pre>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 6 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">6</span>RAG: поиск регламентов доставки в pgvector</div>
+  <p>Эмбеддинг запроса → поиск 3–5 релевантных чанков регламентов в <code>delivery_regulations</code>.</p>
+<pre class="sql">-- 1. Получаем эмбеддинг запроса (через GigaChat Embeddings API)
+-- 2. Поиск ближайших чанков по косинусному расстоянию
+SELECT
+  chunk_id,
+  content,
+  metadata->>'region' <span class="keyword">AS</span> region,
+  1 - (embedding &lt;=&gt; $1::vector) <span class="keyword">AS</span> similarity
+FROM delivery_regulations
+WHERE metadata->>'region' IN ($2, 'РФ')  <span class="comment">-- регион клиента + общие правила</span>
+ORDER BY embedding &lt;=&gt; $1::vector
+LIMIT 5;</pre>
+  <div class="note"><b>$1</b> — вектор эмбеддинга запроса, <b>$2</b> — город доставки клиента.</div>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 7 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">7</span>SQL/Code: расчёт стоимости</div>
+  <p><b>LLM не считает!</b> Математика — только в SQL/Code. Розница/опт определяется по <code>customer_type</code>.</p>
+<pre class="sql">-- Получение цены по артикулу и типу клиента
+SELECT
+  p.article,
+  p.name,
+  CASE
+    WHEN $1 = 'wholesale' <span class="keyword">THEN</span> p.price_wholesale
+    <span class="keyword">ELSE</span> p.price_retail
+  <span class="keyword">END</span> <span class="keyword">AS</span> unit_price
+FROM products p
+WHERE p.article = $2
+   <span class="keyword">OR</span> p.name ILIKE $3;</pre>
+
+<pre><span class="comment">// n8n Code node: итоговый расчёт</span>
+<span class="keyword">const</span> unitPrice = $json.unit_price;
+<span class="keyword">const</span> qty = $json.quantity;
+<span class="keyword">const</span> deliveryTariff = $json.delivery_tariff; <span class="comment">// из RAG-чанка</span>
+
+<span class="keyword">const</span> goodsTotal = unitPrice * qty;
+<span class="keyword">const</span> deliveryTotal = deliveryTariff;
+<span class="keyword">const</span> grandTotal = goodsTotal + deliveryTotal;
+
+<span class="keyword">return</span> [{ json: {
+  goodsTotal: goodsTotal.toFixed(2),
+  deliveryTotal: deliveryTotal.toFixed(2),
+  grandTotal: grandTotal.toFixed(2),
+  currency: <span class="string">'RUB'</span>
+}}];</pre>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 8 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">8</span>LLM (GigaChat): формирование ответа / КП</div>
+  <p>Передаём в LLM <b>только готовые данные</b> (сущности + расчёты + регламенты). ПДн — не передаём.</p>
+<pre><span class="comment">// Системный промпт</span>
+<span class="string">"Ты — ассистент отдела продаж стройматериалов.
+Сформируй вежливый ответ клиенту на основе предоставленных данных.
+Не выдумывай цены, наличие, условия. Не повторяй ИНН, email, телефоны."</span>
+
+<span class="comment">// User-промпт (готовые данные)</span>
+<span class="string">"Данные для ответа:
+- Товар: ЦСП 8мм
+- Количество: 500 листов
+- Цена за единицу: 850 ₽
+- Стоимость товара: 425 000 ₽
+- Доставка в Москву: 15 000 ₽
+- Итого: 440 000 ₽
+- Срок доставки: 3-5 дней
+- Условие оплаты: 100% предоплата для новых клиентов"
+
+Сформируй ответ для Telegram (кратко, 2-4 предложения).</span></pre>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 9 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">9</span>Отправка ответа клиенту</div>
+<pre><span class="comment">// Telegram: HTTP Request node</span>
+POST https://api.telegram.org/bot{TOKEN}/sendMessage
+{
+  <span class="string">"chat_id"</span>: {{ $json.chatId }},
+  <span class="string">"text"</span>: {{ $json.response_text }},
+  <span class="string">"parse_mode"</span>: <span class="string">"Markdown"</span>
+}
+
+<span class="comment">// Email: SMTP node (для email-канала)</span></pre>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 10 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">10</span>Логирование диалога в БД (с маскированием ПДн)</div>
+<pre><span class="comment">// n8n Code node: маскирование перед записью</span>
+<span class="keyword">function</span> maskINN(inn) {
+  <span class="keyword">if</span> (!inn || inn.length &lt; 4) <span class="keyword">return</span> inn;
+  <span class="keyword">return</span> <span class="string">'***-**-***'</span> + inn.slice(-2);
+}
+<span class="keyword">function</span> maskPhone(p) {
+  <span class="keyword">if</span> (!p) <span class="keyword">return</span> p;
+  <span class="keyword">return</span> p.slice(0, 4) + <span class="string">'***-***-'</span> + p.slice(-4);
+}
+<span class="keyword">function</span> maskEmail(e) {
+  <span class="keyword">if</span> (!e) <span class="keyword">return</span> e;
+  <span class="keyword">const</span> [name, domain] = e.split(<span class="string">'@'</span>);
+  <span class="keyword">return</span> name[0] + <span class="string">'***@'</span> + domain;
+}
+
+<span class="keyword">return</span> [{ json: {
+  chat_id: $json.chatId,
+  customer_id: $json.customer_id,
+  channel: $json.channel,
+  client_text: $json.text,
+  bot_response: $json.response_text,
+  inn_masked: maskINN($json.inn),
+  phone_masked: maskPhone($json.phone),
+  email_masked: maskEmail($json.email),
+  created_at: <span class="keyword">new</span> Date()
+}}];</pre>
+
+<pre class="sql">-- Запись в логи
+INSERT INTO dialog_logs
+  (chat_id, customer_id, channel, client_text, bot_response,
+   inn_masked, phone_masked, email_masked, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);</pre>
+</div>
+
+<div class="arrow">↓</div>
+
+<!-- NODE 11 -->
+<div class="node">
+  <div class="node-title"><span class="node-num">11</span>Эскалация менеджеру (fallback)</div>
+  <p>Срабатывает, если: сумма заказа &gt; 500 000 ₽, нестандартный запрос, LLM не смог извлечь сущности.</p>
+<pre><span class="comment">// Отправка уведомления менеджеру в Telegram</span>
+POST https://api.telegram.org/bot{TOKEN}/sendMessage
+{
+  <span class="string">"chat_id"</span>: <span class="string">"MANAGER_TELEGRAM_ID"</span>,
+  <span class="string">"text"</span>: <span class="string">"⚠️ Требуется ручная обработка\n\nКлиент: {{ $json.company_name }}\nЗапрос: {{ $json.client_text }}\nСумма: {{ $json.grandTotal }} ₽\n\nКонтекст: {{ $json.full_context }}"</span>
+}</pre>
+  <div class="warn"><b>Важно:</b> менеджеру передаём полные данные (он — оператор ПДн), но клиенту в ответ пишем: <i>«Передаю вопрос персональному менеджеру, он свяжется в течение 15 минут»</i>.</div>
+</div>
+
+<h2>Схема БД PostgreSQL</h2>
+<table>
+  <tr><th>Таблица</th><th>Назначение</th><th>Ключевые поля</th></tr>
+  <tr><td><code>products</code></td><td>Прайс-лист (500 SKU)</td><td>article, name, price_retail, price_wholesale, stock</td></tr>
+  <tr><td><code>wholesale_customers</code></td><td>Авторизованные оптовики</td><td>customer_id, company_name, inn, email, telegram_user_id, customer_type, is_verified</td></tr>
+  <tr><td><code>delivery_regulations</code></td><td>Регламенты доставки + эмбеддинги</td><td>chunk_id, content, metadata (region), embedding (vector)</td></tr>
+  <tr><td><code>dialog_logs</code></td><td>История диалогов (с маскированием)</td><td>chat_id, customer_id, channel, client_text, bot_response, inn_masked, created_at</td></tr>
+</table>
+
+<h2>Что НЕ входит в воркфлоу (отсутствует в реализации)</h2>
+<div class="warn">
+  <ul>
+    <li>❌ Долгосрочная память клиента (история заказов за месяцы) — не реализована</li>
+    <li>❌ Автоматическая генерация PDF-счёта — только текстовое КП</li>
+    <li>❌ Интеграция с 1С / CRM — только PostgreSQL</li>
+    <li>❌ Мультиязычность — только русский</li>
+    <li>❌ Голосовые сообщения — только текст</li>
+  </ul>
+</div>
+
+<h2>Ключевые принципы реализации</h2>
+<div class="note">
+  <ol>
+    <li><b>LLM не считает</b> — вся математика в SQL/Code.</li>
+    <li><b>ПДн не уходят в LLM</b> — в GigaChat только сущности и готовые данные.</li>
+    <li><b>Всё в РФ</b> — VPS Timeweb + GigaChat (Сбер) + PostgreSQL локально.</li>
+    <li><b>Логи маскируются</b> — ИНН, телефон, email в БД хранятся в обезличенном виде.</li>
+    <li><b>Эскалация — всегда</b>, если есть сомнения или крупная сумма.</li>
+  </ol>
+</div>
+
+</body>
+</html>
