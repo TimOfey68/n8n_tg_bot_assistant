@@ -107,9 +107,6 @@ sudo -u postgres psql -p 5433 -d stroymaterialy_db -f database/seed_data.sql</co
 
 <h2>📊 Результаты работы</h2>
 
-<p><img src="screenshots/telegram_demo.jpg" alt="Демонстрация работы StroyBot в Telegram" style="max-width: 100%; border: 1px solid #d0d7de; border-radius: 6px;"></p>
-<p><em>Пример ответа бота: точная оптовая цена, остаток на складе, стоимость и сроки доставки — все цифры из БД, без галлюцинаций.</em></p>
-
 <h3>Метрики из реального логирования</h3>
 <ul>
   <li>Средний расход токенов на запрос: <strong>~460–520 токенов</strong> (из таблицы <code>dialogue_logs</code>)</li>
