@@ -146,10 +146,3 @@ sudo -u postgres psql -p 5433 -d stroymaterialy_db -f database/seed_data.sql</co
   <li><strong>Мультиязычность:</strong> Поддержка английского для клиентов из СНГ</li>
 </ul>
 
-<h2>📞 Контакты</h2>
-
-<p><strong>Автор:</strong> Тимофей Филимонов<br>
-<strong>GitHub:</strong> <a href="https://github.com/TimOfey68">TimOfey68</a><br>
-<strong>Telegram:</strong> <a href="https://t.me/your_username">@your_username</a></p>
-
-<p><em>Проект разработан в рамках выпускного проекта курса по AI-инженерии. Все данные синтетические, используются только для демонстрации архитектуры.</em></p>
