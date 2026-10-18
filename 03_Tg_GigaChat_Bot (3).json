@@ -1,0 +1,642 @@
+{
+  "name": "03_Tg_GigaChat_Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT client_type, discount_percent, first_name, '{{ $json.text }}'::text as user_message \nFROM clients \nWHERE chat_id = {{ $json.chat_id }};\n",
+        "options": {}
+      },
+      "id": "30fddd9e-4369-4390-898b-f559564cc204",
+      "name": "Execute a SQL query Клиент",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        448,
+        176
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "C821XfgFxRTpqyiG",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "880083b7-303d-4350-89dd-e3f384e4fcf9",
+      "name": "Telegram Trigger",
+      "webhookId": "4b510ca7-2b83-407b-87da-efedc69822b3",
+      "notesInFlow": false,
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        368
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "lmaP4UgWzNpAP3va",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH user_words AS (\n  SELECT regexp_replace(word, '[^а-яёa-z0-9]', '', 'g') AS clean_word\n  FROM unnest(string_to_array(lower('{{ $('Code in JavaScript ParseTelegramMessage').first().json.user_message }}'), ' ')) AS word\n  WHERE length(regexp_replace(word, '[^а-яёa-z0-9]', '', 'g')) > 3\n),\nmatched_cities AS (\n  SELECT DISTINCT cs.city_name\n  FROM user_words uw\n  JOIN city_synonyms cs ON lower(cs.synonym) = uw.clean_word\n)\nSELECT dr.zone, dr.cities, dr.base_cost, dr.delivery_days, dr.rule_text\nFROM matched_cities mc\nJOIN delivery_rules dr ON dr.zone = mc.city_name OR dr.cities ILIKE '%' || mc.city_name || '%'\nLIMIT 1;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        448,
+        368
+      ],
+      "id": "52be96bb-284a-4f2b-ba2f-988e39becb67",
+      "name": "SQL_Delivery1",
+      "credentials": {
+        "postgres": {
+          "id": "C821XfgFxRTpqyiG",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH search_words AS (\n  SELECT regexp_replace(word, '[^а-яёa-z0-9]', '', 'g') AS clean_word\n  FROM unnest(string_to_array(lower('{{ $json.user_message }}'), ' ')) AS word\n  WHERE length(regexp_replace(word, '[^а-яёa-z0-9]', '', 'g')) > 3\n),\nfts_matches AS (\n  SELECT name, price_retail, price_wholesale, stock_quantity, unit,\n         ts_rank(to_tsvector('russian', name), to_tsquery('russian', clean_word)) AS rank\n  FROM search_words, products\n  WHERE to_tsvector('russian', name) @@ to_tsquery('russian', clean_word)\n),\ntrigram_matches AS (\n  SELECT name, price_retail, price_wholesale, stock_quantity, unit,\n         similarity(name, clean_word) AS sim\n  FROM search_words, products\n  WHERE similarity(name, clean_word) > 0.3\n)\nSELECT name, price_retail, price_wholesale, stock_quantity, unit\nFROM fts_matches\nUNION\nSELECT name, price_retail, price_wholesale, stock_quantity, unit\nFROM trigram_matches\nORDER BY name\nLIMIT 1;",
+        "options": {}
+      },
+      "id": "b2fceed0-4a43-4b7d-846f-352693d4f505",
+      "name": "Execute a SQL query Product search",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        448,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "C821XfgFxRTpqyiG",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const tgData = $('Telegram Trigger').first().json;\n\nreturn [{\n  json: {\n    chat_id: tgData.message?.chat?.id || tgData.chat?.id || tgData.chat_id,\n    username: tgData.message?.from?.username || tgData.from?.username || '',\n    user_message: tgData.message?.text || tgData.text || ''\n  }\n}];"
+      },
+      "id": "58110e62-5494-4558-ae8d-e191e9cb2e6c",
+      "name": "Code in JavaScript ParseTelegramMessage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Получаем данные из SQL-нод и Telegram\nconst tgData = $('Telegram Trigger').first().json;\nconst clientData = $('Execute a SQL query Клиент').first()?.json || {};\nconst productData = $('Execute a SQL query Product search').first()?.json || {};\nconst deliveryData = $('SQL_Delivery1').first()?.json || {};\n\n// 2. Базовые переменные\nconst userText = tgData.text || tgData.user_message || 'Приветствие';\nconst chatId = tgData.chat_id || tgData.message?.chat?.id;\n\n// 3. Данные клиента\nconst clientType = clientData?.client_type || 'retail';\nconst discount = clientData?.discount_percent || 0;\nconst firstName = clientData?.first_name || 'Клиент';\n\n// 4. Данные товара (Fallback логика)\nlet productContext = \"Товар не распознан. Уточни, какой товар тебя интересует.\";\nlet isProductFound = false;\n\nif (productData && productData.name) {\n  isProductFound = true;\n  const price = clientType === 'wholesale' ? productData.price_wholesale : productData.price_retail;\n  productContext = `\n- Товар: ${productData.name}\n- Цена для клиента: ${price} руб. за ${productData.unit}\n- Остаток на складе: ${productData.stock_quantity} ${productData.unit}`;\n}\n\n// 5. Данные доставки\nlet deliveryContext = \"Регион доставки не указан или не найден в базе.\";\nif (deliveryData && deliveryData.zone) {\n  deliveryContext = `\n- Зона доставки: ${deliveryData.zone}\n- Стоимость доставки: ${deliveryData.base_cost} руб.\n- Сроки: ${deliveryData.delivery_days}\n- Правила: ${deliveryData.rule_text}`;\n}\n\n// 6. Системный промпт\nconst systemPrompt = `Ты — ИИ-ассистент отдела продаж компании стройматериалов.\nЖЁСТКИЕ ПРАВИЛА (152-ФЗ и PEf03):\n1. ТЫ НЕ СЧИТАЕШЬ МАТЕМАТИКУ. Используй ТОЛЬКО предоставленные ниже цифры.\n2. НИКОГДА не выдумывай цены, наличие или условия доставки.\n3. НИКОГДА не повторяй ИНН, паспорта, email и телефоны.\n4. 4. Если клиент НЕ авторизован (тип: retail), а просит оптовые цены, ответь: \"Оптовые цены доступны только авторизованным дистрибьюторам. Укажите ваш ИНН или email для проверки.\"\n\nДАННЫЕ ИЗ БД (Используй ТОЛЬКО их):\n- Клиент: ${firstName} (Тип: ${clientType}, Скидка: ${discount}%)\n${productContext}\n${deliveryContext}\n\nВОПРОС КЛИЕНТА: \"${userText}\"\n\nТВОЯ ЗАДАЧА:\n${isProductFound \n  ? 'Сформируй краткий, вежливый и деловой ответ (2-4 предложения). Назови точную цену, остаток, стоимость и сроки доставки, если они есть в данных выше. В конце предложи оформить заказ.' \n  : 'Товар не найден в базе или запрос неясен. Вежливо извинись, скажи, что не смог найти такой товар в текущем каталоге, и попроси клиента уточнить название или задать другой вопрос по стройматериалам.'}`;\n\n// 7. Маскирование ПДн для логирования (152-ФЗ)\nconst chatIdStr = String(chatId);\nconst maskedChatId = chatIdStr.length > 6 \n  ? chatIdStr.substring(0, 3) + '****' + chatIdStr.substring(chatIdStr.length - 3) \n  : '***';\n\n// 8. Возврат данных (БЕЗ access_token — он будет получен позже)\nreturn {\n  json: {\n    chat_id: chatId,\n    client_type: clientType,\n    system_prompt: systemPrompt,\n    user_message: userText,\n    log_chat_id: maskedChatId,\n    log_user_message: userText.length > 50 ? userText.substring(0, 50) + '...' : userText,\n    log_client_type: clientType\n  }\n};"
+      },
+      "id": "6553d021-a7da-487f-8d87-5f39de5556e3",
+      "name": "Code in JavaScript BuildPromptAndMaskPII",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        672,
+        352
+      ],
+      "id": "70656851-5e00-4c8e-94f5-c391d56b311c",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Basic MDE5ZDY4NzEtOTdlNy03MDIzLTk5ZTgtOGYzMzY5MWExZTk3OjdiOTU4NGE3LTVjYTQtNDcxZC05MTdiLTgxZWFkZTgzNGU1OA=="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/x-www-form-urlencoded"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "RqUID",
+              "value": "=f47ac10b-58cc-4372-a567-0e02b2c3d479"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "scope",
+              "value": "GIGACHAT_API_PERS"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1120,
+        368
+      ],
+      "id": "f0f4a25a-fbc8-496e-99a2-7a3baeedacca",
+      "name": "HTTP Request GigaChat token"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('HTTP Request GigaChat token').first().json.access_token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  \"model\": \"GigaChat\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": $('Code in JavaScript BuildPromptAndMaskPII').first().json.system_prompt\n    },\n    {\n      \"role\": \"user\",\n      \"content\": $('Code in JavaScript BuildPromptAndMaskPII').first().json.user_message\n    }\n  ],\n  \"temperature\": 0.1,\n  \"max_tokens\": 500\n}) }}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1344,
+        368
+      ],
+      "id": "89c7faec-d991-4a5a-ba2f-43aad91f74c4",
+      "name": "HTTP Request GigaChat API"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/bot8698177391:AAHLHMcT8IITcR0KJELNPgWajVjVZHlXw3Y/sendMessage",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={\n  \"Content-Type\": \"application/json\"\n}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $('Code in JavaScript ParseTelegramMessage').first().json.chat_id }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.choices[0].message.content }}"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "timeout": 30000
+        }
+      },
+      "id": "94de7703-5af7-4b80-afe9-65dbf5bf8cda",
+      "name": "HTTP Request Send Telegram Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1568,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "dialogue_logs",
+          "mode": "list",
+          "cachedResultName": "dialogue_logs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $('Code in JavaScript BuildPromptAndMaskPII').first().json.log_chat_id }}",
+            "user_message": "={{ $('Code in JavaScript BuildPromptAndMaskPII').first().json.log_user_message }}",
+            "bot_response": "={{ $('HTTP Request GigaChat API').first().json.choices[0].message.content }}",
+            "tokens_used": "={{ $('HTTP Request GigaChat API').first().json.usage.total_tokens }}",
+            "channel": "=='telegram'",
+            "client_type": "={{ $('Code in JavaScript BuildPromptAndMaskPII').first().json.log_client_type }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "chat_id",
+              "displayName": "chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "client_type",
+              "displayName": "client_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "user_message",
+              "displayName": "user_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "bot_response",
+              "displayName": "bot_response",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tokens_used",
+              "displayName": "tokens_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1792,
+        368
+      ],
+      "id": "3188fcc4-2248-4d4d-a23e-88d5053a2218",
+      "name": "Insert rows in dialogue_logs",
+      "credentials": {
+        "postgres": {
+          "id": "C821XfgFxRTpqyiG",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "📥 Telegram Trigger. Точка входа\n\nЛовит входящие сообщения от пользователей 24/7 и запускает цепочку",
+        "height": 112,
+        "width": 262,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -192,
+        528
+      ],
+      "id": "3558e412-0164-4372-957d-68338f9ac171",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "📝 Dialogue Logs. Аудит и учёт\n\nЗаписывает историю диалога в PostgreSQL: маскированный ID, запрос, ответ и токены. Нужно для контроля стоимости и безопасности.",
+        "height": 144
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1776,
+        576
+      ],
+      "id": "c7a2d18c-17e3-4082-a0c5-455c3146cca4",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "🔑 GigaChat Token.  Ключ доступа\n\nПолучает временный access_token по OAuth 2.0 для авторизации в API Сбера. Обновляется каждые 30 минут.",
+        "height": 176,
+        "width": 192
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1056,
+        576
+      ],
+      "id": "a90a013b-1baf-4a32-8773-8f5d33d8ff33",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "🤖 GigaChat API\nГенерация ответа\n\nОтправляет промпт в нейросеть. Возвращает финальный текст для клиента и количество потреблённых токенов",
+        "width": 192
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1280,
+        576
+      ],
+      "id": "7b206c83-936a-4b80-abea-745e735439a9",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "📤 Send Telegram. Отправка. \n\nДоставляет сгенерированный ИИ ответ обратно пользователю в мессенджер.",
+        "height": 112
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1504,
+        576
+      ],
+      "id": "bf5375d9-c267-4746-9f4e-0f5550073ed1",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "🔀 Merge.Сборщик\n\nСклеивает результаты трёх параллельных SQL-запросов в один поток. Не ломает цепочку, если одна из веток вернула 0 строк (fallback).",
+        "height": 192,
+        "width": 176,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        624,
+        576
+      ],
+      "id": "04a483e3-ee36-4015-b2a7-997b1660129b",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "content": "🧩 ParseTelegramMessage. Парсер\n\nИзвлекает из сырого JSON Telegram чистые данные: chat_id, username и текст запроса.",
+        "height": 96,
+        "width": 278
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        96,
+        528
+      ],
+      "id": "31eed860-eecc-4462-aaec-e4606e7ddcae",
+      "name": "Sticky Note7"
+    },
+    {
+      "parameters": {
+        "content": "🧑‍ SQL Клиент. Авторизация\n\nПроверяет chat_id в БД. Возвращает тип клиента (опт/розница), размер скидки и имя.\n\n🧩SQL Product search.  Умный поиск\n\nИщет товар по названию (FTS + триграммы). Возвращает цену и остаток, даже если клиент сделал опечатку.\n\n🚚 SQL Delivery. Логистика\n\nИщет город в таблице синонимов (city_synonyms). Возвращает зону, стоимость и сроки доставки.",
+        "height": 304,
+        "width": 288,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        736
+      ],
+      "id": "e9d1c619-c5fb-4987-afcd-db8e7977a4d5",
+      "name": "Sticky Note8"
+    },
+    {
+      "parameters": {
+        "content": "BuildPromptAndMaskPII. Мозг системы\n\nСобирает системный промпт с жёсткими правилами и маскирует chat_id для безопасного логирования (152-ФЗ).",
+        "width": 208
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        832,
+        576
+      ],
+      "id": "bd6c7113-830c-48de-959e-5d10e20a45e5",
+      "name": "Sticky Note10"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Execute a SQL query Клиент": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript ParseTelegramMessage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SQL_Delivery1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query Product search": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript ParseTelegramMessage": {
+      "main": [
+        [
+          {
+            "node": "SQL_Delivery1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Execute a SQL query Клиент",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Execute a SQL query Product search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript BuildPromptAndMaskPII": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request GigaChat token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript BuildPromptAndMaskPII",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request GigaChat token": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request GigaChat API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request GigaChat API": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request Send Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request Send Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Insert rows in dialogue_logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "aed85842-0b21-45ed-a03c-b979f3401d5d",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8e88481f55fc3f94474413cbff676f0ae916eb906d5ee3bfeb61d0a873f3eb6d"
+  },
+  "nodeGroups": [],
+  "id": "bUXqg4mZbe66C54s",
+  "tags": []
+}
